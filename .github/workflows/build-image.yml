@@ -86,39 +86,66 @@ jobs:
           echo "--- upstream version ---"
           node -p "require('./upstream/package.json').version"
 
-      # 4) 从上游源码里读出版本号与提交号，用作镜像标签。
-      - name: Derive version and upstream commit
-        id: ver
+      # 4) 从上游源码里读出版本号与提交号，并自己算出镜像标签与 OCI 标签。
+      #
+      # 这里**不用** docker/metadata-action：它读的是"当前工作流仓库"的
+      # git 上下文，而我们的源码来自另一个仓库（上游），它的
+      # `context: git:<dir>` 只在未发布的 master 上存在，v5 / v6 都会报
+      # "Invalid context source: git:upstream"。自己算反而更直接——上游的
+      # 版本号和提交号本来就是在上一步从上游目录里读出来的。
+      - name: Derive version, commit, tags and labels
+        id: meta
         working-directory: upstream
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
           SHA=$(git rev-parse HEAD)
-          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA"        >> "$GITHUB_OUTPUT"
-          echo "sha7=${SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "upstream version=$VERSION sha=$SHA"
+          SHA7=${SHA:0:7}
+          IMAGE="${REGISTRY}/${IMAGE_NAME}"
 
-      # 5) 生成标签。上游版本号是主标签，latest 跟着它走。
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          context: git:upstream
-          images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.ver.outputs.version }}
-            type=raw,value=upstream-${{ steps.ver.outputs.sha7 }}
-            type=sha,format=long
-            type=raw,value=latest
-          labels: |
-            org.opencontainers.image.source=https://github.com/urarattas/docker-our-free-model
-            org.opencontainers.image.licenses=MIT
-            org.opencontainers.image.title=Our Free Model (standalone)
-            org.opencontainers.image.description=Our Free Model 独立本地服务，源码来自 upstream ${{ steps.ver.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
-            org.opencontainers.image.revision=${{ steps.ver.outputs.sha }}
+          # 标签：上游版本号是主标签，latest 跟着它走。
+          # build-push-action 的 `tags` 输入按**逗号**分隔（Util.getInputList
+          # 的默认行为），所以这里用逗号。
+          TAGS="${IMAGE}:${VERSION}"
+          TAGS="${TAGS},${IMAGE}:upstream-${SHA7}"
+          TAGS="${TAGS},${IMAGE}:sha-${SHA}"
+          TAGS="${TAGS},${IMAGE}:latest"
+
+          # OCI 标签。source 指向本仓库（镜像的来源），revision 指向上游
+          # 提交（代码实际来自哪里）——两者不是同一个仓库，都写上。
+          #
+          # `labels` 输入用 ignoreComma:true 解析，也就是**只按换行**分隔，
+          # 逗号会被当成标签内容的一部分。所以这里必须用换行，不能用逗号——
+          # 用逗号会把 6 个标签拼成 1 个，构建出来的镜像只剩一个畸形标签。
+          #
+          # 描述里也不用逗号：即使分隔符是换行，CSV 解析器仍然按逗号切列，
+          # 值里带逗号会让解析结果依赖引号规则。标签值保持简单可预期。
+          #
+          # 换行不能用 `NL=$(printf '\n')` 再插值——命令替换会吃掉结尾的换行，
+          # 结果是 6 个标签被拼成 1 行。这里直接用 $'\n'（bash 语法，GitHub
+          # Actions 的默认 shell 是 bash）。
+          LABELS="org.opencontainers.image.source=https://github.com/urarattas/docker-our-free-model"
+          LABELS="${LABELS}"$'\n'"org.opencontainers.image.licenses=MIT"
+          LABELS="${LABELS}"$'\n'"org.opencontainers.image.title=Our Free Model (standalone)"
+          LABELS="${LABELS}"$'\n'"org.opencontainers.image.description=Our Free Model standalone service built from upstream ${SHA7}"
+          LABELS="${LABELS}"$'\n'"org.opencontainers.image.version=${VERSION}"
+          LABELS="${LABELS}"$'\n'"org.opencontainers.image.revision=${SHA}"
+
+          {
+            echo "version=${VERSION}"
+            echo "sha=${SHA}"
+            echo "sha7=${SHA7}"
+            echo "tags=${TAGS}"
+            # 多行输出用 heredoc 形式，避免换行被当成多行 GITHUB_OUTPUT 语法。
+            echo "labels<<OFM_LABELS_EOF"
+            echo "${LABELS}"
+            echo "OFM_LABELS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "version=${VERSION} sha=${SHA}"
+          echo "tags: ${TAGS}"
+          echo "labels:"
+          echo "${LABELS}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -155,8 +182,8 @@ jobs:
           {
             echo "### 镜像已发布"
             echo ""
-            echo "- 上游提交：\`${{ steps.ver.outputs.sha }}\`"
-            echo "- 上游版本：${{ steps.ver.outputs.version }}"
+            echo "- 上游提交：\`${{ steps.meta.outputs.sha }}\`"
+            echo "- 上游版本：${{ steps.meta.outputs.version }}"
             echo "- 标签：\`${{ steps.meta.outputs.tags }}\`"
             echo "- 摘要：\`${{ steps.push.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
