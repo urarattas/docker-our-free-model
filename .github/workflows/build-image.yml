@@ -74,6 +74,9 @@ jobs:
           sparse-checkout-cone-mode: false
 
       # 3) 合成：上游源码 + 我们的容器化文件。
+      #
+      # 容器化文件整体放进 upstream/docker/，与仓库里的布局一致。这样同一份
+      # Dockerfile 在本地和 CI 里是同一份、COPY 路径也完全相同。
       - name: Compose upstream source with the container overlay
         run: |
           set -euo pipefail
@@ -162,12 +165,21 @@ jobs:
 
       # context 必须是路径（upstream），不能是 Git 上下文：BuildKit 在 Git
       # 上下文下会自己重新 clone 仓库，第 3 步的合成结果会被完全忽略。
+      #
+      # file: 必须给**绝对路径**。buildx 解析 --file 的相对路径时是相对当前
+      # 工作目录，不是相对 context（build/opt.go 的 loadInputs：
+      # `dockerfileDir = filepath.Dir(inp.DockerfilePath)`）。CI 里 CWD 是
+      # workspace 根，context 是 upstream/，于是相对路径 docker/Dockerfile
+      # 会被解析成 <workspace>/docker —— 那里没有这个目录，构建直接失败：
+      #   ERROR: failed to build: resolve : lstat docker: no such file or directory
+      #
+      # 绝对路径就没有这个歧义：无论 CWD 在哪，指向的都是同一个文件。
       - name: Build and push
         id: push
         uses: docker/build-push-action@v6
         with:
-          context: upstream
-          file: docker/Dockerfile
+          context: ${{ github.workspace }}/upstream
+          file: ${{ github.workspace }}/upstream/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
