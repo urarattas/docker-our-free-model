@@ -16,9 +16,14 @@
 ## 1. 快速开始
 
 ```bash
+# 一把管理台的钥匙（不设则管理页面只在容器内可达）
+export OFM_RELAY_KEY=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-32)
+
 docker run -d --name ofm \
   -v ofm-data:/data \
   -p 18901:18901 \
+  -p 18902:18902 \
+  -e OFM_RELAY_KEY \
   ghcr.io/urarattas/docker-our-free-model:latest
 ```
 
@@ -26,9 +31,20 @@ docker run -d --name ofm \
 
 ```bash
 cd docker
+export OFM_RELAY_KEY=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-32)
 docker compose up -d
 docker compose logs -f
 ```
+
+然后：
+
+| 用途 | 地址 | 凭据 |
+| --- | --- | --- |
+| 推理客户端 | `http://<本机地址>:18901/v1` | `standaloneLanKey` |
+| **浏览器管理台** | `http://<本机地址>:18902/?key=$OFM_RELAY_KEY` | 首次用 `OFM_RELAY_KEY`，之后用会话 cookie |
+
+> 管理台端口等于整个管理台的权限（能轮换 API Key、导入账号凭据、改出口）。
+> **只发布到可信的局域网，不要映射到公网。** 详见第 2.1 节。
 
 首次启动后取密钥：
 
@@ -55,12 +71,61 @@ curl -H "Authorization: Bearer $LAN_KEY" \
 ## 2. 端口与可达性（重要）
 
 独立服务的设计是**只监听回环地址**：管理页面、账号凭据、API Key 都属于本机。
-容器把这个回环监听器放进了容器网络，所以对外的可达性分两档：
+容器把这个回环监听器放进了容器网络，所以对外的可达性分三档：
 
 | 端口 | 绑定 | 容器外可达 | 内容 |
 | --- | --- | --- | --- |
 | `18900` | `127.0.0.1`（容器内回环） | ❌ | 本机管理端口：管理页面、`/api/management/*`、本机 API（`forwardKey`） |
 | `18901` | `0.0.0.0` | ✅ | **LAN 推理中继**：只放行 5 条 `/v1/*` 推理路径 |
+| `18902` | `0.0.0.0` | ✅ | **管理转发**（本镜像提供）：管理页面 |
+
+### 2.1 局域网访问管理页面（18902）
+
+管理页面在容器外**打不开**——独立服务拒绝非回环的 `Host`，这是上游明确记录为
+"未实现"的部分（issue #216 "standalone 容器化支持"仍是 open 状态）。上游原文：
+
+> issue #216 的 Docker / FPK / NAS 远程管理部署仍未实现：管理监听器和 Host
+> 信任围栏仍限 loopback，不支持 `--host`、`OFM_ALLOW_NON_LOOPBACK` 或
+> `OFM_TRUSTED_HOSTS` 放宽管理访问。容器映射中继端口可供已配置的推理客户
+> 端连接，但不能据此从 LAN 打开管理页。
+
+本镜像用**容器内的转发进程**补上这一块：
+[docker/management-relay.mjs](docker/management-relay.mjs) 监听 `0.0.0.0:18902`，
+把请求转发到容器的回环端口，并在转发时改写 `Host`、`Origin`、`Referer`，
+让服务以为请求来自本机。上游那道围栏本身**没有**被削弱——服务仍然只监听回环，
+relay 是容器里唯一能到达它的东西。
+
+**用法**：
+
+```bash
+# 生成一把密钥
+export OFM_RELAY_KEY=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-32)
+docker compose up -d
+
+# 浏览器打开这个地址（首次会换取会话 cookie，之后地址栏里不再需要 key）
+http://<本机地址>:18902/?key=$OFM_RELAY_KEY
+```
+
+`?key=` 里的密钥会在响应时换成 HttpOnly 的会话 cookie，地址栏随即被替换成
+干净的地址，密钥不会留在浏览器历史里。
+
+**两把钥匙的分工**：
+
+| | 浏览器 → relay | relay → 服务 |
+| --- | --- | --- |
+| 凭据 | `OFM_RELAY_KEY`（你设的）换来的会话 cookie | 服务自己的 `forwardKey`（读自 `settings.json`） |
+| 作用 | 决定谁能开管理台 | 满足服务对管理 API 的 bearer 要求 |
+
+服务自己的会话 cookie 绑在服务的端口上，浏览器访问 relay 端口时不会带回去，
+所以 relay 代浏览器完成这一步。**服务密钥只留在容器内**，不会传给浏览器。
+
+**没有 `OFM_RELAY_KEY` 就不启动转发**，管理页面只在容器内可达。宁可没有
+管理页面，也不把它裸奔到局域网上。
+
+> **这个端口等于整个管理台的权限。** 管理台能轮换 API Key、导入账号凭据、
+> 改出口设置。**只发布到你信任的局域网，不要映射到公网。**
+
+### 2.2 LAN 推理中继（18901）
 
 LAN 中继的边界（已实测）：
 
@@ -72,23 +137,15 @@ LAN 中继的边界（已实测）：
   泄露只需轮换本机那一把，LAN Key 泄露只需轮换 LAN 那一把；
 - `/health` 在本机端口上是免鉴权的，在 LAN 中继上不是。
 
-**管理页面在容器外打不开，这是上游明确记录为"未实现"的部分**（issue #216
-"standalone 容器化支持"仍是 open 状态），不是本镜像的缺陷。上游原文：
+### 2.3 完全不发布管理端口
 
-> issue #216 的 Docker / FPK / NAS 远程管理部署仍未实现：管理监听器和 Host
-> 信任围栏仍限 loopback，不支持 `--host`、`OFM_ALLOW_NON_LOOPBACK` 或
-> `OFM_TRUSTED_HOSTS` 放宽管理访问。容器映射中继端口可供已配置的推理客户
-> 端连接，但不能据此从 LAN 打开管理页。
+不想在局域网暴露管理台，就不要设 `OFM_RELAY_KEY`，也不发布 `18902`。
+管理页面仍可通过 `docker exec` 进入容器使用：
 
-想在容器外使用管理页面，两条路：
-
-1. **端口转发到容器回环**（适合临时操作）：
-   ```bash
-   docker run -d -p 127.0.0.1:18900:18900 -v ofm-data:/data <image>
-   # 启动日志里会打印一次性管理登录链接
-   docker compose logs ofm | grep 管理页面
-   ```
-2. **`docker exec` 进容器**：管理页面与 API 在容器内始终可用。
+```bash
+# 启动日志里会打印一次性管理登录链接
+docker compose logs ofm | grep 管理页面
+```
 
 ---
 
@@ -360,7 +417,14 @@ docker run -d --name ofm -v ofm-data:/data -p 18901:18901 \
 
 ## 9. 已知边界
 
-- **管理页面在容器外不可达**——上游 issue #216 未实现，见第 2 节。
+- **管理页面在容器外可达，但代价是信任**。上游 issue #216 未实现，所以本镜像
+  用容器内的转发进程补上（见第 2.1 节）。上游那道回环围栏**没有被削弱**，
+  但转发端口等于管理台的全部权限——只发布到可信的局域网。
+- **转发进程用轮询而不是事件通知**。容器里的 `/bin/sh` 是 dash，不支持
+  `wait -n`（bash 扩展），所以 entrypoint 用 1 秒轮询判断两个进程是否还活着。
+  后果是 relay 挂掉到容器退出之间最多有 1 秒延迟。
+- **relay 的会话只存在于内存**。容器重启后管理台需要重新用 `?key=` 换取
+  会话 cookie；这是有意的——会话不该被持久化到数据卷。
 - **容器内账号 OAuth 登录需要浏览器**。上游 README 明确写着"没有提供容器内
   账号 OAuth 登录适配"：Gemini、Cline 等渠道的登录流程要在**本机**完成，
   然后把账号备份手动导入到容器里的独立服务（网页 → 免费账号渠道 → 供应商

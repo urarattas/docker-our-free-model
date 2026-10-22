@@ -1,13 +1,19 @@
 # Our Free Model — 独立本地服务（standalone）
 #
-# 容器对外只暴露 LAN 推理中继（18901）；本机管理端口（18900）在容器内可达，
-# 宿主机需要访问时用端口转发或 docker exec。
+# 容器对外暴露两个端口：
+#
+#   18901  LAN 推理中继。OpenAI / Anthropic 兼容的推理端点，用 LAN Key。
+#   18902  管理转发。管理页面（管理台、账号凭据、设置），用 OFM_RELAY_KEY。
+#
+# 独立服务自己的 18900 只在容器内可达 —— 上游把它设计成回环绑定，管理
+# 页面因此不能直接发布。18902 上的转发进程在容器内部改写请求头，让服务
+# 以为请求来自本机；这是上游 issue #216 未实现部分的容器侧替代方案。
 #
 #   docker compose up -d
 #   docker compose logs -f
 #
-# 首次启动后，LAN Key 与本机 API Key 都在数据卷里：
-#   docker compose exec ofm cat /data/settings.json
+# 首次启动后取密钥：
+#   docker compose exec ofm cat /data/settings.json      # forwardKey、standaloneLanKey
 #
 # 数据卷 ofm-data 保留全部状态：API Key、账号凭据、渠道账本、用量统计。
 # 升级镜像不会丢数据；换机器时把该卷带走即可。
@@ -17,7 +23,7 @@ services:
     image: ghcr.io/urarattas/docker-our-free-model:latest
     # 从源码构建本地镜像时改用：
     #   build:
-    #     context: .
+    #     context: ..
     #     dockerfile: docker/Dockerfile
     container_name: ofm
     restart: unless-stopped
@@ -31,11 +37,22 @@ services:
       OFM_HOME: /data
       # 本机端口（回环绑定）。容器外要用 docker exec 或端口转发访问。
       OFM_PORT: "18900"
+      # 管理转发的监听端口。
+      OFM_RELAY_PORT: "18902"
+      # 管理转发的密钥。留空则不启动转发，管理页面只在容器内可达。
+      # 生成一把：openssl rand -base64 24 | tr -d '/+=' | cut -c1-32
+      OFM_RELAY_KEY: "${OFM_RELAY_KEY:-}"
 
-    # 只发布 LAN 推理中继。管理页面不在容器外可达——这是上游 issue #216
-    # 明确记录为"未实现"的部分，不是本镜像的缺陷。
     ports:
+      # LAN 推理中继：推理客户端连这里。
       - "18901:18901"
+      # 管理转发：浏览器连这里。首次访问用
+      #   http://<本机地址>:18902/?key=<OFM_RELAY_KEY>
+      # 换取会话 cookie，之后地址栏里就不需要带 key 了。
+      #
+      # 注意：这个端口等于整个管理台的权限。**只发布到可信的局域网**，
+      # 不要映射到公网。
+      - "18902:18902"
 
     # 出网访问各上游（模型网关、公告 feed、出口 IP 探测）。
     # 需要代理时在这里给 HTTP_PROXY / HTTPS_PROXY / NO_PROXY。

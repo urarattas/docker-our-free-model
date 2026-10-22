@@ -6,6 +6,10 @@
 # Cordis 或任何宿主凭据库。服务在容器内只监听回环地址，容器外部通过
 # --lan 打开的 LAN 推理中继访问 /v1/* 推理端点。
 #
+# 管理页面（管理台、账号凭据、设置）由同镜像内的 management-relay 转发到
+# 容器的回环端口：独立服务本身拒绝非回环 Host，relay 在容器内部改写请求头，
+# 使它看起来是本机访问。relay 要一把 OFM_RELAY_KEY 才肯转发。
+#
 # 构建上下文是仓库根目录（因为要取 src/、vendor/、packages/standalone/）：
 #   docker build -f docker/Dockerfile -t our-free-model:local .
 #
@@ -56,6 +60,7 @@ COPY --from=build /build/runtime /app
 
 # entrypoint 必须在切换到非 root 用户之前就位并可执行。
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/management-relay.mjs /usr/local/lib/ofm/management-relay.mjs
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 # 以非 root 运行。数据目录的属主在镜像里先建好：具名卷挂载后会继承这个
