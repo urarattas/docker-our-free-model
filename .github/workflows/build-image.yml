@@ -161,17 +161,9 @@ jobs:
             echo "- 摘要：\`${{ steps.push.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 6) 镜像推完后，通知"同步上游"工作流把 main 与 docker 分支也更新
-      #    上去，这样仓库本身与上游保持一致（消除 GitHub 上的 "behind" 提示）。
-      #    GITHUB_TOKEN 的推送不会再次触发工作流，所以靠 repository_dispatch。
-      - name: Notify the upstream sync workflow
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          curl -sS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/dispatches" \
-            -d '{"event_type":"sync-upstream"}'
+# 注意：这里**不**再去 dispatch sync-upstream。
+#
+# 同步方向只有一条：sync-upstream 同步完分支后 dispatch build-image。
+# 两条流程互相 dispatch 会形成无限回环——每次同步触发一次构建，每次构建
+# 又触发一次同步。分支同步本身有独立的定时任务（03:43 UTC），镜像构建也
+# 有自己的定时任务（03:17 UTC），两者都不依赖对方。

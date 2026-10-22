@@ -45,14 +45,29 @@ jobs:
           persist-credentials: false
 
       - name: Fetch upstream
+        id: check
         run: |
           set -euo pipefail
           git remote remove upstream 2>/dev/null || true
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch --no-tags upstream main
+          # checkout 的 fetch-depth: 0 已经把所有分支取下来了，但显式再取一次
+          # 远端引用，让下面 --force-with-lease 用到的 origin/docker 一定存在，
+          # 不依赖 checkout 的内部行为。
+          git fetch --no-tags origin "+refs/heads/*:refs/remotes/origin/*"
           echo "upstream/main = $(git rev-parse upstream/main)"
           echo "main          = $(git rev-parse main)"
           echo "docker        = $(git rev-parse docker)"
+          echo "origin/docker = $(git rev-parse origin/docker)"
+
+          # 上游有没有新提交？只有真的变了才值得重建镜像。
+          if [ "$(git rev-parse main)" = "$(git rev-parse upstream/main)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游没有新提交，本次只做核对，不重建镜像。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "上游有新提交：$(git rev-parse --short upstream/main)"
+          fi
 
       # main 只做快进。main 上不应该有我们自己的提交；如果有，说明有人
       # 直接往 main 上提交了，这时快进会失败并让这次运行变红——这是对的，
@@ -74,15 +89,16 @@ jobs:
             exit 1
           fi
 
+          # main 已经一致时不退出整个步骤——后面还有 docker 分支的 rebase
+          # 要做，早退会让 docker 分支永远停在旧 main 上。
           if [ "$(git rev-parse main)" = "$(git rev-parse upstream/main)" ]; then
             echo "main 已经与 upstream/main 一致，无需同步。"
-            exit 0
+          else
+            git checkout main
+            git merge --ff-only upstream/main
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" main:main
+            echo "::notice::main 已快进到 upstream/main"
           fi
-
-          git checkout main
-          git merge --ff-only upstream/main
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" main:main
-          echo "::notice::main 已快进到 upstream/main"
 
       # docker 分支上有我们自己的提交，所以只能把它的提交搬到新的 main 之上。
       - name: Rebase the docker branch onto the new main
@@ -112,7 +128,13 @@ jobs:
               exit 1
             }
           fi
-          git push --force-with-lease "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" docker:docker
+
+          # 用显式 lease 钉住"我们开始时看到的那个远端提交"。rebase 会重写
+          # docker 分支的历史，所以推送必须是强推；但裸 --force 会在别人
+          # 恰好也推了 docker 分支时覆盖掉他的提交。--force-with-lease 带上
+          # 我们 fetch 到的那个 SHA，两边不一致就拒绝推送。
+          git push --force-with-lease=docker:"$(git rev-parse origin/docker)" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" docker:docker
           echo "::notice::docker 分支已更新到新的 main 之上"
 
       - name: Summary
@@ -123,11 +145,18 @@ jobs:
             echo "- upstream/main：\`$(git rev-parse upstream/main)\`"
             echo "- main：\`$(git rev-parse main)\`"
             echo "- docker：\`$(git rev-parse docker)\`"
+            echo "- 上游有无新提交：${{ steps.check.outputs.changed }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # GITHUB_TOKEN 的推送不会再次触发工作流（只有 workflow_dispatch 和
       # repository_dispatch 一定会触发），所以这里显式通知镜像构建。
+      #
+      # 只在**上游确实有新提交**时才通知。上游没变时通知一次，会让镜像被
+      # 原样重建一遍——浪费一次多平台构建，还在 GHCR 上多出一串内容相同
+      # 的摘要。build-image 自己也有定时任务，所以漏掉一次通知不会让镜像
+      # 停在旧版本。
       - name: Trigger the image build
+        if: steps.check.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
