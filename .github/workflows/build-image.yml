@@ -47,7 +47,11 @@ concurrency:
 env:
   UPSTREAM_REPO: Ebony-Vinyl/dsh-our-free-model
   REGISTRY: ghcr.io
-  IMAGE_NAME: docker-our-free-model
+  # GHCR 的镜像路径必须是 <registry>/<namespace>/<image>，namespace 是
+  # 账号或组织名。少写这一段的话，第一段路径会被当成 namespace，推送会得到
+  #   unexpected status from HEAD request to .../blobs/sha256:...: 400 Bad Request
+  # —— 因为 GITHUB_TOKEN 只能推到本账号下与本仓库关联的包。
+  IMAGE: ghcr.io/urarattas/docker-our-free-model
 
 jobs:
   build:
@@ -104,15 +108,15 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           SHA=$(git rev-parse HEAD)
           SHA7=${SHA:0:7}
-          IMAGE="${REGISTRY}/${IMAGE_NAME}"
+          IMAGE_REF="${IMAGE}"
 
           # 标签：上游版本号是主标签，latest 跟着它走。
           # build-push-action 的 `tags` 输入按**逗号**分隔（Util.getInputList
           # 的默认行为），所以这里用逗号。
-          TAGS="${IMAGE}:${VERSION}"
-          TAGS="${TAGS},${IMAGE}:upstream-${SHA7}"
-          TAGS="${TAGS},${IMAGE}:sha-${SHA}"
-          TAGS="${TAGS},${IMAGE}:latest"
+          TAGS="${IMAGE_REF}:${VERSION}"
+          TAGS="${TAGS},${IMAGE_REF}:upstream-${SHA7}"
+          TAGS="${TAGS},${IMAGE_REF}:sha-${SHA}"
+          TAGS="${TAGS},${IMAGE_REF}:latest"
 
           # OCI 标签。source 指向本仓库（镜像的来源），revision 指向上游
           # 提交（代码实际来自哪里）——两者不是同一个仓库，都写上。

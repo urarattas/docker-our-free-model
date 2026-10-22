@@ -37,7 +37,7 @@ LABEL org.opencontainers.image.title="Our Free Model (standalone)" \
       org.opencontainers.image.description="Our Free Model 独立本地服务：OpenAI / Anthropic 兼容推理端点，容器化运行" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/urarattas/docker-our-free-model" \
-      org.opencontainers.image.documentation="https://github.com/urarattas/docker-our-free-model/blob/docker/README-DOCKER.md"
+      org.opencontainers.image.documentation="https://github.com/urarattas/docker-our-free-model/blob/docker/README.md"
 
 # 独立服务的数据目录：账号凭据、渠道账本、用量统计、API Key 都落在这里。
 # 挂载为卷即可在升级镜像后保留全部状态。
