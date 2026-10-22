@@ -130,6 +130,8 @@ LAN 中继的边界（已实测）：
    ▼                │     docker ← rebase 到新的 main 之上      │
 upstream/main       │                        │                  │
    │                │                        │ dispatch         │
+   │                │                        │ （仅当上游确有    │
+   │                │                        │  新提交时）      │
    │                │                        ▼                  │
    │                │  ② build-image.yml（每天 03:17 UTC）       │
    │                │     检出 upstream/main（最新上游源码）      │
@@ -141,6 +143,12 @@ upstream/main       │                        │                  │
    │                │        :latest / :2.5.8 / :upstream-<sha> │
    └────────────────┴──────────────────────────────────────────┘
 ```
+
+> **当前状态**：本仓库的改动**只做本地提交**，不推送到 GitHub，所以这两条
+> 工作流目前不会自动运行。它们的逻辑与
+> [`scripts/sync-upstream-local.sh`](scripts/sync-upstream-local.sh) 一致，
+> 而那个脚本是本地跑的——见第 6 节。工作流文件保留在仓库里，是为了将来
+> 决定推送时可以直接用。
 
 ### 为什么要两个分支
 
@@ -250,7 +258,55 @@ curl http://192.168.1.10:18901/v1/chat/completions \
 
 ---
 
-## 6. 从源码构建
+## 6. 本地使用（本仓库当前的工作方式）
+
+本仓库的改动目前**只做本地提交**，不推送到 GitHub：`origin` 的 push URL 被
+置为 `DISABLED://local-only-no-push`，任何 `git push` 都会被拒绝。
+
+同步上游用本地脚本，它与 `.github/workflows/sync-upstream.yml` 是同一套逻辑：
+
+```bash
+sh scripts/sync-upstream-local.sh
+```
+
+它做四件事：
+
+1. `git fetch upstream main`；
+2. 把 `main` 快进到 `upstream/main`（`main` 上只允许上游的提交）；
+3. 把 `docker` 分支 rebase 到新的 `main` 之上（我们自己的提交只有一条，
+   所以 rebase 几乎不会冲突）；
+4. 重新计算容器运行时闭包，并打印构建镜像的命令。
+
+**不推送**（默认）。要推送到自己的 fork：
+
+```bash
+sh scripts/sync-upstream-local.sh --push
+```
+
+> 需要先把 `origin` 的 push URL 恢复：
+> `git remote set-url --push origin https://github.com/urarattas/docker-our-free-model.git`
+
+只重建镜像、不动分支：
+
+```bash
+sh scripts/sync-upstream-local.sh --build-only
+```
+
+### 分支职责
+
+| 分支 | 内容 | 规则 |
+| --- | --- | --- |
+| `main` | 纯上游内容 | 只接受快进，不接受我们自己的提交 |
+| `docker` | 上游内容 + 容器化文件 | 每次同步后 rebase 到新的 `main` 之上 |
+
+`docker` 分支上的我们自己的提交只有一条
+（"Add Docker packaging for the standalone service"），所以同步时的 rebase
+几乎不会产生冲突；真冲突了脚本会让 rebase 停在原地并报错，不会留下
+带冲突标记的提交。
+
+---
+
+## 7. 从源码构建
 
 ```bash
 git clone https://github.com/urarattas/docker-our-free-model.git
@@ -271,7 +327,7 @@ node /tmp/ofm-runtime/packages/standalone/cli.mjs --port 18900 --data-dir /tmp/o
 
 ---
 
-## 7. 数据与升级
+## 8. 数据与升级
 
 数据卷 `/data` 里是全部状态：
 
@@ -302,7 +358,7 @@ docker run -d --name ofm -v ofm-data:/data -p 18901:18901 \
 
 ---
 
-## 8. 已知边界
+## 9. 已知边界
 
 - **管理页面在容器外不可达**——上游 issue #216 未实现，见第 2 节。
 - **容器内账号 OAuth 登录需要浏览器**。上游 README 明确写着"没有提供容器内
@@ -322,7 +378,7 @@ docker run -d --name ofm -v ofm-data:/data -p 18901:18901 \
 
 ---
 
-## 9. 许可
+## 10. 许可
 
 本仓库的容器化文件（`docker/`、`scripts/collect-standalone-runtime.mjs`、
 `.github/workflows/`）随上游的 MIT 许可分发。上游项目：
