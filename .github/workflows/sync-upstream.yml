@@ -1,0 +1,140 @@
+name: sync-upstream
+
+# 把 main 分支同步到上游仓库的 main 分支，并把 docker 分支搬到新的 main 之上。
+#
+# 分支约定：
+#   main   —— 纯上游内容。镜像 GitHub 上的 "behind N commits" 提示，
+#             任何时候 diff main..upstream/main 都是空的。
+#   docker —— 上游内容 + 我们的容器化文件（docker/、
+#             scripts/collect-standalone-runtime.mjs、.github/workflows/）。
+#             这是本仓库的默认分支，镜像与工作流都从这里运行。
+#
+# 为什么两个分支都要维护：
+#   - main 保持是上游的忠实副本，diff 干净，出问题能直接对照上游；
+#   - docker 是我们真正工作的分支，需要跟着上游前进，否则两边差异会越拉越大。
+#
+# 同步完成后会 dispatch 一次 build-image，让镜像立刻跟上。
+
+on:
+  schedule:
+    # 每天一次。用 UTC，避开整点以躲开调度高峰。
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sync-upstream]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Ebony-Vinyl/dsh-our-free-model
+
+jobs:
+  sync:
+    name: Sync main and docker with upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream main
+          echo "upstream/main = $(git rev-parse upstream/main)"
+          echo "main          = $(git rev-parse main)"
+          echo "docker        = $(git rev-parse docker)"
+
+      # main 只做快进。main 上不应该有我们自己的提交；如果有，说明有人
+      # 直接往 main 上提交了，这时快进会失败并让这次运行变红——这是对的，
+      # 静默覆盖掉别人的提交比变红糟糕得多。
+      - name: Fast-forward main to upstream/main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git merge-base --is-ancestor main upstream/main; then
+            echo "main 可以快进到 upstream/main。"
+          else
+            echo "::error::main 上有不属于上游的提交，无法快进。列出这些提交："
+            git log --oneline main ^upstream/main | head -20
+            exit 1
+          fi
+
+          if [ "$(git rev-parse main)" = "$(git rev-parse upstream/main)" ]; then
+            echo "main 已经与 upstream/main 一致，无需同步。"
+            exit 0
+          fi
+
+          git checkout main
+          git merge --ff-only upstream/main
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" main:main
+          echo "::notice::main 已快进到 upstream/main"
+
+      # docker 分支上有我们自己的提交，所以只能把它的提交搬到新的 main 之上。
+      - name: Rebase the docker branch onto the new main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git rev-parse --verify docker >/dev/null 2>&1; then
+            echo "docker 分支不存在，跳过。"
+            exit 0
+          fi
+
+          git checkout docker
+          BASE=$(git merge-base docker main)
+          if [ "$BASE" = "$(git rev-parse docker)" ]; then
+            echo "docker 已经包含 main 的全部内容，只需快进。"
+            git merge --ff-only main
+          else
+            echo "把 docker 自己的提交搬到新的 main 之上。"
+            git rebase --onto main "$BASE" docker || {
+              echo "::error::docker 分支 rebase 冲突，请手动处理。"
+              git rebase --abort || true
+              exit 1
+            }
+          fi
+          git push --force-with-lease "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" docker:docker
+          echo "::notice::docker 分支已更新到新的 main 之上"
+
+      - name: Summary
+        run: |
+          {
+            echo "### 上游同步完成"
+            echo ""
+            echo "- upstream/main：\`$(git rev-parse upstream/main)\`"
+            echo "- main：\`$(git rev-parse main)\`"
+            echo "- docker：\`$(git rev-parse docker)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # GITHUB_TOKEN 的推送不会再次触发工作流（只有 workflow_dispatch 和
+      # repository_dispatch 一定会触发），所以这里显式通知镜像构建。
+      - name: Trigger the image build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO}/dispatches" \
+            -d '{"event_type":"build-image"}'

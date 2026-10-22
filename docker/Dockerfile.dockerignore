@@ -1,0 +1,30 @@
+# 构建上下文只需要 standalone 的运行时闭包。
+#
+# 这个文件是 Dockerfile 专属的忽略清单（Docker 会优先使用与 Dockerfile
+# 同目录、同名的 <Dockerfile名>.dockerignore），放在 docker/ 下而不是仓库
+# 根目录，这样就不会在上游同步时与上游可能新增的根 .dockerignore 撞车。
+#
+# 真正的运行时闭包由 scripts/collect-standalone-runtime.mjs 从源码算出，
+# Dockerfile 按需 COPY。所以这里只负责排掉"明确用不上的目录"，用来缩短
+# 上下文传输时间——凡是被算进闭包的目录，这里都不能排除。
+#
+# 特别地：src/、vendor/、packages/standalone/web/ 都要保留，收集脚本要读
+# 它们才能算出闭包；收集脚本自己（scripts/）也在上下文里。
+
+.git
+.github
+.trae-html-share-packages
+docs
+feed
+locale
+adapter
+catalog
+worker
+packages/desktop
+packages/standalone/frontend
+packages/standalone/node_modules
+packages/standalone/package-lock.json
+**/node_modules
+**/.DS_Store
+**/*.log
+**/*.tgz

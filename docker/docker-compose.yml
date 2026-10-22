@@ -1,0 +1,54 @@
+# Our Free Model — 独立本地服务（standalone）
+#
+# 容器对外只暴露 LAN 推理中继（18901）；本机管理端口（18900）在容器内可达，
+# 宿主机需要访问时用端口转发或 docker exec。
+#
+#   docker compose up -d
+#   docker compose logs -f
+#
+# 首次启动后，LAN Key 与本机 API Key 都在数据卷里：
+#   docker compose exec ofm cat /data/settings.json
+#
+# 数据卷 ofm-data 保留全部状态：API Key、账号凭据、渠道账本、用量统计。
+# 升级镜像不会丢数据；换机器时把该卷带走即可。
+
+services:
+  ofm:
+    image: ghcr.io/urarattas/docker-our-free-model:latest
+    # 从源码构建本地镜像时改用：
+    #   build:
+    #     context: .
+    #     dockerfile: docker/Dockerfile
+    container_name: ofm
+    restart: unless-stopped
+
+    # 状态持久化。服务以 0600 写 settings.json（API Key），卷必须可写。
+    volumes:
+      - ofm-data:/data
+
+    environment:
+      # 独立服务的数据目录；账号凭据、账本、用量、API Key 都落在这里。
+      OFM_HOME: /data
+      # 本机端口（回环绑定）。容器外要用 docker exec 或端口转发访问。
+      OFM_PORT: "18900"
+
+    # 只发布 LAN 推理中继。管理页面不在容器外可达——这是上游 issue #216
+    # 明确记录为"未实现"的部分，不是本镜像的缺陷。
+    ports:
+      - "18901:18901"
+
+    # 出网访问各上游（模型网关、公告 feed、出口 IP 探测）。
+    # 需要代理时在这里给 HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
+    # environment:
+    #   HTTP_PROXY: http://host.docker.internal:7890
+    #   NO_PROXY: localhost,127.0.0.1
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18900/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+volumes:
+  ofm-data:
